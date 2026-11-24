@@ -1,4 +1,4 @@
-"""Small dataset adapters for the 2D registration experiments."""
+"""Pair records and the OASIS 2D dataset loader."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,15 +14,35 @@ _LABEL = "slice_seg24.nii.gz"
 
 @dataclass(frozen=True)
 class Pair:
-    """OASIS images and labels in (row, column) order, with spacing in the same order."""
+    """Images and optional labels on one fixed grid, with spacing in array order."""
 
     fixed: np.ndarray
     moving: np.ndarray
-    fixed_seg: np.ndarray
-    moving_seg: np.ndarray
-    spacing: tuple[float, float]
+    fixed_seg: np.ndarray | None
+    moving_seg: np.ndarray | None
+    spacing: tuple[float, ...]
     fixed_id: str
     moving_id: str
+    dataset: str = "oasis_2d"
+    landmarks_fixed: np.ndarray | None = None
+    landmarks_moving: np.ndarray | None = None
+    ground_truth_field: np.ndarray | None = None
+    fixed_mask: np.ndarray | None = None
+    moving_mask: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class PairSpec:
+    """A reproducible fixed/moving pairing; paths are resolved by its loader."""
+
+    dataset: str
+    pair_id: str
+    fixed_id: str
+    moving_id: str
+    fixed_path: Path
+    moving_path: Path
+    fixed_label_path: Path | None = None
+    moving_label_path: Path | None = None
 
 
 def _root(path: str | Path | None) -> Path:

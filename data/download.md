@@ -1,6 +1,6 @@
 # Downloading the Datasets
 
-All datasets live in `/dataset/` (outside the repo, so they are never committed). See `dataset/README.md` for the contents of each folder and its licence.
+All datasets live in `../dataset/` (outside the repo, so they are never committed). See `../dataset/README.md` for the contents of each folder and its licence.
 
 Total size: about 24 GB. Tools used: `curl` (or `aria2c` for faster, resumable downloads), `unzip`, `tar`, and Python.
 
@@ -54,7 +54,7 @@ c.download_from_selection(downloadDir='D:/Optimization/dataset/tcia_breast_nact'
                           dirTemplate='%PatientID/%Modality_%SeriesInstanceUID')
 ```
 
-Each DCE series has 180 slices, which is 60 slices × 3 phases. Split the phases by the DICOM tag `AcquisitionTime`.
+Most DCE series have 180 files (60 slices × 3 phases), but some have 60 or 64 slices across 3–7 phases. Group by complete spatial slice grids in `InstanceNumber` order and verify `AcquisitionTime` increases between phases.
 
 ## 3. Manual downloads (form or login required)
 

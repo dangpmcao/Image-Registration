@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from common.geometry import _check_image, _samples, warp
+from data.geometry import _check_image, _samples, bspline_basis, warp
 
 
 @dataclass
@@ -14,27 +14,9 @@ class RegistrationResult:
     history: list[float]
 
 
-def _basis(length: int, spacing: float) -> np.ndarray:
-    """Cubic cardinal B-spline basis; lattice centers start at -spacing."""
-    if length < 1 or not np.isfinite(spacing) or spacing < 2:
-        raise ValueError("image length must be positive and grid spacing finite and >= 2 voxels")
-    positions = np.arange(length, dtype=np.float64) / spacing
-    cell = np.floor(positions).astype(int)
-    u = positions - cell
-    weights = np.stack(((1 - u) ** 3 / 6,
-                        (3 * u ** 3 - 6 * u ** 2 + 4) / 6,
-                        (-3 * u ** 3 + 3 * u ** 2 + 3 * u + 1) / 6,
-                        u ** 3 / 6), axis=1)
-    basis = np.zeros((length, cell[-1] + 4), dtype=np.float64)
-    rows = np.arange(length)
-    for k in range(4):
-        basis[rows, cell + k] = weights[:, k]
-    return basis
-
-
 def bspline_field(control: np.ndarray, shape: tuple[int, int], spacing: tuple[float, float]) -> np.ndarray:
     """Expand a (control_y, control_x, 2) lattice to a dense displacement."""
-    by, bx = _basis(shape[0], spacing[0]), _basis(shape[1], spacing[1])
+    by, bx = bspline_basis(shape[0], spacing[0]), bspline_basis(shape[1], spacing[1])
     control = np.asarray(control, dtype=np.float64)
     if control.shape != (by.shape[1], bx.shape[1], 2) or not np.isfinite(control).all():
         raise ValueError("control lattice must match image shape and spacing and be finite")
@@ -148,7 +130,8 @@ def register(
     history: list[float] = []
     for level in range(levels):
         level_spacing = tuple(max(2.0, s / (2 ** level)) for s in spacing)
-        by, bx = _basis(fixed.shape[0], level_spacing[0]), _basis(fixed.shape[1], level_spacing[1])
+        by, bx = (bspline_basis(fixed.shape[0], level_spacing[0]),
+                  bspline_basis(fixed.shape[1], level_spacing[1]))
         control = np.zeros((by.shape[1], bx.shape[1], 2), dtype=np.float64)
         first_moment = np.zeros_like(control)
         second_moment = np.zeros_like(control)

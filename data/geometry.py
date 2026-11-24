@@ -1,6 +1,24 @@
-"""Shared 2D image geometry: arrays are (row, col), fields are (dy, dx)."""
+"""Shared cubic B-spline basis and 2D image geometry."""
 
 import numpy as np
+
+
+def bspline_basis(length: int, spacing: float) -> np.ndarray:
+    """Cubic cardinal B-spline basis; lattice centers start at -spacing."""
+    if length < 1 or not np.isfinite(spacing) or spacing < 2:
+        raise ValueError("image length must be positive and grid spacing finite and >= 2 voxels")
+    positions = np.arange(length, dtype=np.float64) / spacing
+    cell = np.floor(positions).astype(int)
+    u = positions - cell
+    weights = np.stack(((1 - u) ** 3 / 6,
+                        (3 * u ** 3 - 6 * u ** 2 + 4) / 6,
+                        (-3 * u ** 3 + 3 * u ** 2 + 3 * u + 1) / 6,
+                        u ** 3 / 6), axis=1)
+    basis = np.zeros((length, cell[-1] + 4), dtype=np.float64)
+    rows = np.arange(length)
+    for k in range(4):
+        basis[rows, cell + k] = weights[:, k]
+    return basis
 
 
 def _check_image(image: np.ndarray, name: str) -> np.ndarray:
