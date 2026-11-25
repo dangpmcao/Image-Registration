@@ -1,6 +1,7 @@
 """Sunnybrook cine MRI and TCIA breast DCE-MRI pair adapters."""
 
 from collections import defaultdict
+from functools import lru_cache
 from pathlib import Path
 import re
 
@@ -67,6 +68,49 @@ def _sunnybrook_cases(root: Path, split: str):
         if len(contour_dirs) != 1:
             raise FileNotFoundError(f"Expected contours for {dicom_dir.parent.name}")
         yield dicom_dir, contour_dirs[0]
+
+
+def list_sunnybrook_paper_pairs(root: Path, split: str, fold: int,
+                                seed: int = 42) -> list[PairSpec]:
+    """de Vos cardiac protocol: 30 training scans, 15 held-out scans per fold.
+
+    ``train`` has every ordered pair of distinct cine phases within each
+    training scan (30 × 20 × 19 = 11,400). ``test`` has both ED/ES directions
+    on the held-out scans. ``val`` monitors ED/ES on training scans; it shares
+    subjects with train and must not be reported as an independent test set.
+    """
+    if split not in ("train", "val", "test") or fold not in (1, 2, 3):
+        raise ValueError("Sunnybrook paper split must be train/val/test and fold 1..3")
+    cases = []
+    for dicom_dir, contour_dir in _sunnybrook_cases(Path(root), "all"):
+        match = re.search(r"Part([123])$", dicom_dir.parents[2].name)
+        if match is None:
+            raise ValueError(f"Cannot determine Sunnybrook challenge part: {dicom_dir}")
+        cases.append((int(match.group(1)), dicom_dir, contour_dir))
+    if any(sum(part == fold_id for part, _, _ in cases) != 15 for fold_id in (1, 2, 3)):
+        raise ValueError("Expected exactly 15 Sunnybrook scans in each released part")
+    selected = [(dicom_dir, contour_dir) for part, dicom_dir, contour_dir in cases
+                if (part == fold) == (split == "test")]
+    pairs = []
+    for dicom_dir, contour_dir in selected:
+        case = dicom_dir.parent.name
+        if split == "train":
+            phases = ((fixed, moving) for fixed in range(20)
+                      for moving in range(20) if fixed != moving)
+            label_dir = None
+        else:
+            ed, es, _ = _phase_contours(contour_dir)
+            phases = ((ed, es), (es, ed))
+            label_dir = contour_dir
+        for fixed, moving in phases:
+            pairs.append(PairSpec("sunnybrook",
+                                  f"fold{fold}_{case}_p{fixed:02}_p{moving:02}",
+                                  f"{case}:p{fixed:02}", f"{case}:p{moving:02}",
+                                  dicom_dir, dicom_dir, label_dir, label_dir))
+    if split == "train":
+        order = np.random.default_rng(seed).permutation(len(pairs))
+        pairs = [pairs[index] for index in order]
+    return pairs
 
 
 def list_pairs(dataset: str, root: Path, split: str = "val", seed: int = 42) -> list[PairSpec]:
@@ -146,27 +190,71 @@ def _stack(frames: list[tuple[np.ndarray, object]]):
     return volume, (float(np.median(distances)), *spacing_2d), positions, orientation
 
 
+@lru_cache(maxsize=64)
+def load_sunnybrook_phase(dicom_dir: Path, phase_index: int):
+    """Load one 3D cine timepoint; cache a bounded number for random pair training."""
+    dicom_dir = Path(dicom_dir)
+    if not 0 <= phase_index < 20:
+        raise ValueError("Sunnybrook phase index must be 0..19")
+    count = len(list(dicom_dir.glob("IM-*.dcm")))
+    if count == 0 or count % 20:
+        raise ValueError(f"Expected 20 phases per Sunnybrook slice: {dicom_dir}")
+    frames = [_read_image(dicom_dir / f"IM-0001-{20 * index + phase_index + 1:04}.dcm")
+              for index in range(count // 20)]
+    volume, spacing, positions, orientation = _stack(frames)
+    source_positions = np.stack([np.asarray(ds.ImagePositionPatient, dtype=float)
+                                 for _, ds in frames])
+    for array in (volume, positions, orientation, source_positions):
+        array.setflags(write=False)
+    return volume, spacing, positions, orientation, source_positions
+
+
+def _contour_volume(contour_dir: Path, phase: int, shape: tuple[int, int, int],
+                    sorted_positions: np.ndarray, source_positions: np.ndarray):
+    labels = np.zeros(shape, dtype=np.uint8)
+    covered = np.zeros(shape[0], dtype=bool)
+    for source_index, position in enumerate(source_positions):
+        number = 20 * source_index + phase + 1
+        contour = contour_dir / f"IM-0001-{number:04}-icontour-manual.txt"
+        if not contour.is_file():
+            continue
+        distances = np.linalg.norm(sorted_positions - position, axis=1)
+        target_index = int(np.argmin(distances))
+        if distances[target_index] > 0.1 or covered[target_index]:
+            raise ValueError(f"Contour slice does not match DICOM volume: {contour}")
+        labels[target_index] = _contour_mask(contour, shape[1:])
+        covered[target_index] = True
+    return labels, covered
+
+
 def _sunnybrook_volume(spec: PairSpec) -> Pair:
-    match_ed = re.search(r":ED(\d+)$", spec.fixed_id)
-    match_es = re.search(r":ES(\d+)$", spec.moving_id)
-    if not match_ed or not match_es:
-        raise ValueError("Sunnybrook pair has no annotated ED/ES phase IDs")
-    ed, es = int(match_ed.group(1)), int(match_es.group(1))
-    count = len(list(spec.fixed_path.glob("IM-*.dcm")))
-    if count % 20 != 0 or count == 0:
-        raise ValueError(f"Expected 20 phases per Sunnybrook slice: {spec.fixed_path}")
-    fixed_frames, moving_frames = [], []
-    for index in range(count // 20):
-        fixed_frames.append(_read_image(spec.fixed_path / f"IM-0001-{20 * index + ed + 1:04}.dcm"))
-        moving_frames.append(_read_image(spec.moving_path / f"IM-0001-{20 * index + es + 1:04}.dcm"))
-    fixed, spacing, fixed_pos, fixed_orientation = _stack(fixed_frames)
-    moving, moving_spacing, moving_pos, moving_orientation = _stack(moving_frames)
+    fixed_match = re.search(r":(?:ED|ES|p)(\d+)$", spec.fixed_id)
+    moving_match = re.search(r":(?:ED|ES|p)(\d+)$", spec.moving_id)
+    if not fixed_match or not moving_match:
+        raise ValueError("Sunnybrook pair needs two cine phase indices")
+    fixed_phase, moving_phase = int(fixed_match.group(1)), int(moving_match.group(1))
+    fixed, spacing, fixed_pos, fixed_orientation, fixed_source_pos = load_sunnybrook_phase(
+        spec.fixed_path, fixed_phase)
+    moving, moving_spacing, moving_pos, moving_orientation, moving_source_pos = load_sunnybrook_phase(
+        spec.moving_path, moving_phase)
     if (fixed.shape != moving.shape or not np.allclose(spacing, moving_spacing, atol=1e-4)
             or not np.allclose(fixed_pos, moving_pos, atol=0.1)
             or not np.allclose(fixed_orientation, moving_orientation, atol=1e-4)):
         raise ValueError("Sunnybrook ED and ES grids differ")
+    fixed_seg = moving_seg = evaluation_mask = None
+    if spec.fixed_label_path is not None and spec.moving_label_path is not None:
+        fixed_seg, fixed_covered = _contour_volume(
+            spec.fixed_label_path, fixed_phase, fixed.shape, fixed_pos, fixed_source_pos)
+        moving_seg, moving_covered = _contour_volume(
+            spec.moving_label_path, moving_phase, moving.shape, moving_pos, moving_source_pos)
+        common_slices = fixed_covered & moving_covered
+        if not common_slices.any():
+            raise ValueError("Sunnybrook phases have no jointly annotated slices")
+        evaluation_mask = np.broadcast_to(common_slices[:, None, None], fixed.shape).copy()
     fixed, moving = _normalise(fixed, moving)
-    return Pair(fixed, moving, None, None, spacing, spec.fixed_id, spec.moving_id, spec.dataset)
+    return Pair(fixed, moving, fixed_seg, moving_seg, spacing,
+                spec.fixed_id, spec.moving_id, spec.dataset,
+                evaluation_mask=evaluation_mask)
 
 
 def _contour_mask(path: Path, shape: tuple[int, int]) -> np.ndarray:

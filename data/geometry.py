@@ -5,8 +5,8 @@ import numpy as np
 
 def bspline_basis(length: int, spacing: float) -> np.ndarray:
     """Cubic cardinal B-spline basis; lattice centers start at -spacing."""
-    if length < 1 or not np.isfinite(spacing) or spacing < 2:
-        raise ValueError("image length must be positive and grid spacing finite and >= 2 voxels")
+    if length < 1 or not np.isfinite(spacing) or spacing < 1:
+        raise ValueError("image length must be positive and grid spacing finite and >= 1 voxel")
     positions = np.arange(length, dtype=np.float64) / spacing
     cell = np.floor(positions).astype(int)
     u = positions - cell

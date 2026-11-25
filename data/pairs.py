@@ -29,6 +29,7 @@ class Pair:
     ground_truth_field: np.ndarray | None = None
     fixed_mask: np.ndarray | None = None
     moving_mask: np.ndarray | None = None
+    evaluation_mask: np.ndarray | None = None
 
 
 @dataclass(frozen=True)

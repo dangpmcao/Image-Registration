@@ -22,9 +22,13 @@ def _ncc(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
     return float(a @ b / denominator) if denominator > 0 else 0.0
 
 
-def _dice(a: np.ndarray | None, b: np.ndarray | None) -> float | None:
+def _dice(a: np.ndarray | None, b: np.ndarray | None,
+          evaluation_mask: np.ndarray | None = None) -> float | None:
     if a is None or b is None:
         return None
+    if evaluation_mask is not None:
+        a = np.where(evaluation_mask, a, 0)
+        b = np.where(evaluation_mask, b, 0)
     scores = np.fromiter(dice(a, b).values(), dtype=float)
     finite = scores[np.isfinite(scores)]
     return float(finite.mean()) if finite.size else None
@@ -61,6 +65,11 @@ def save_result(pair: Pair, field: np.ndarray, warped: np.ndarray, *,
     mask = (pair.fixed_mask > 0 if pair.fixed_mask is not None else pair.fixed > 0)
     if not mask.any():
         raise ValueError("fixed image has no evaluation foreground")
+    evaluation_mask = pair.evaluation_mask
+    if evaluation_mask is not None:
+        evaluation_mask = np.asarray(evaluation_mask, dtype=bool)
+        if evaluation_mask.shape != pair.fixed.shape or not evaluation_mask.any():
+            raise ValueError("label evaluation mask must match image and contain voxels")
     if pair.fixed.ndim == 2:
         determinant = jacobian_determinant(field)
         warped_seg = warp(pair.moving_seg, field, order=0) if pair.moving_seg is not None else None
@@ -79,8 +88,10 @@ def save_result(pair: Pair, field: np.ndarray, warped: np.ndarray, *,
         "config": config,
         "ncc_before": _ncc(pair.fixed, pair.moving, mask),
         "ncc_after": _ncc(pair.fixed, warped, mask),
-        "dice_before": _dice(pair.fixed_seg, pair.moving_seg),
-        "dice_after": _dice(pair.fixed_seg, warped_seg),
+        "dice_before": _dice(pair.fixed_seg, pair.moving_seg, evaluation_mask),
+        "dice_after": _dice(pair.fixed_seg, warped_seg, evaluation_mask),
+        "label_coverage_percent": (float(100 * evaluation_mask.mean())
+                                   if evaluation_mask is not None else None),
         "folding_percent_foreground": float(100 * np.mean(determinant[mask] <= 0)),
         "folding_percent_full": float(100 * np.mean(determinant <= 0)),
         "field_error_mm": field_error,
