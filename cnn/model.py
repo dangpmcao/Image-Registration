@@ -63,7 +63,7 @@ def ncc_loss(fixed: Tensor, warped: Tensor, mask: Tensor | None = None) -> Tenso
     a = (fixed - mean_fixed[:, None, None, None]) * weight
     b = (warped - mean_warped[:, None, None, None]) * weight
     numerator = (a * b).sum(dim=(1, 2, 3))
-    denominator = torch.sqrt(a.square().sum(dim=(1, 2, 3)) * b.square().sum(dim=(1, 2, 3)))
+    denominator = torch.sqrt((a.square().sum(dim=(1, 2, 3)) * b.square().sum(dim=(1, 2, 3))).clamp_min(1e-24))
     correlation = torch.where(denominator > 1e-12, numerator / denominator.clamp_min(1e-12), 0)
     return (1 - correlation).mean()
 

@@ -12,6 +12,7 @@ import numpy as np
 from data.pairs import Pair
 from data.geometry import dice, jacobian_determinant, warp
 from data.geometry3d import jacobian_determinant3d, warp3d
+from data.metrics import landmark_errors, normalized_mutual_information, surface_distances
 
 
 def _ncc(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
@@ -88,12 +89,25 @@ def save_result(pair: Pair, field: np.ndarray, warped: np.ndarray, *,
         "config": config,
         "ncc_before": _ncc(pair.fixed, pair.moving, mask),
         "ncc_after": _ncc(pair.fixed, warped, mask),
+        "nmi_before": normalized_mutual_information(pair.fixed, pair.moving, mask),
+        "nmi_after": normalized_mutual_information(pair.fixed, warped, mask),
+        "mse_before": float(np.mean((pair.fixed[mask] - pair.moving[mask]) ** 2)),
+        "mse_after": float(np.mean((pair.fixed[mask] - warped[mask]) ** 2)),
         "dice_before": _dice(pair.fixed_seg, pair.moving_seg, evaluation_mask),
         "dice_after": _dice(pair.fixed_seg, warped_seg, evaluation_mask),
         "label_coverage_percent": (float(100 * evaluation_mask.mean())
                                    if evaluation_mask is not None else None),
         "folding_percent_foreground": float(100 * np.mean(determinant[mask] <= 0)),
         "folding_percent_full": float(100 * np.mean(determinant <= 0)),
+        "jacobian_std_full": float(determinant.std()),
+        "jacobian_std_foreground": float(determinant[mask].std()),
+        "tre": (landmark_errors(pair.landmarks_fixed, pair.landmarks_moving, field, pair.spacing)
+                if pair.landmarks_fixed is not None and pair.landmarks_moving is not None else None),
+        # Missing annotation slices cannot be interpreted as 3D background.
+        "surface_distances_before": (surface_distances(pair.fixed_seg, pair.moving_seg, pair.spacing)
+                                     if evaluation_mask is None or evaluation_mask.all() else None),
+        "surface_distances_after": (surface_distances(pair.fixed_seg, warped_seg, pair.spacing)
+                                    if evaluation_mask is None or evaluation_mask.all() else None),
         "field_error_mm": field_error,
         "registration_seconds": seconds,
     }

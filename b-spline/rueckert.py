@@ -1,8 +1,7 @@
 """Affine-first 3D B-spline registration following Rueckert et al. (1999).
 
-The image metric is differentiable Parzen-window NMI. Coarse-to-fine local
-fields are added as in the paper's multi-grid equation; this implementation
-keeps those residual grids instead of explicitly subdividing one lattice.
+The image metric is differentiable Parzen-window NMI. A single cubic lattice
+is subdivided exactly as the control spacing is halved between image levels.
 Arrays and pull displacements use (z, y, x) order. Physical coordinates below
 are millimetres along those array axes, not scanner-world coordinates.
 """
@@ -16,7 +15,7 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from data.geometry import bspline_basis
-from data.geometry3d import resize_field, resize_volume, warp3d
+from data.geometry3d import resize_volume, warp3d
 
 
 @dataclass
@@ -78,6 +77,28 @@ def _expand(control: Tensor, bases: tuple[Tensor, Tensor, Tensor]) -> Tensor:
     return torch.einsum("xc,zycd->zyxd", bx, partial)
 
 
+def subdivide_lattice(control: np.ndarray, target_shape: tuple[int, int, int]) -> np.ndarray:
+    """Exact cubic subdivision for lattices whose first point is at -spacing.
+
+    Fine even indices lie halfway between coarse points; odd indices coincide
+    with coarse points. The masks are (1,1)/2 and (1,6,1)/8 respectively.
+    """
+    refined = control
+    for axis, count in enumerate(target_shape):
+        old_count = refined.shape[axis]
+        weights = np.zeros((count, old_count), dtype=np.float32)
+        for index in range(count):
+            first = index // 2
+            coefficients = (0.5, 0.5) if index % 2 == 0 else (0.125, 0.75, 0.125)
+            if first + len(coefficients) > old_count:
+                raise ValueError("target grid is incompatible with half-spacing subdivision")
+            weights[index, first:first + len(coefficients)] = coefficients
+        moved = np.moveaxis(refined, axis, 0)
+        moved = (weights @ moved.reshape(old_count, -1)).reshape(count, *moved.shape[1:])
+        refined = np.moveaxis(moved, 0, axis)
+    return refined
+
+
 def _fixed_bins(fixed: Tensor, mask: Tensor, bins: int):
     scaled = fixed[mask].clamp(0, 1) * (bins - 1)
     lower = torch.floor(scaled).long()
@@ -111,11 +132,11 @@ def _bending(displacement_mm: Tensor, spacing_mm: Tensor) -> Tensor:
     """Mean squared second physical derivatives of the local transform."""
     terms = []
     for axis in range(3):
-        terms.append(torch.diff(displacement_mm, n=2, dim=axis).square().mean()
+        terms.append(torch.diff(displacement_mm, n=2, dim=axis).square().sum(-1).mean()
                      / spacing_mm[axis] ** 4)
     for axis_a, axis_b in ((0, 1), (0, 2), (1, 2)):
         mixed = torch.diff(torch.diff(displacement_mm, dim=axis_a), dim=axis_b)
-        terms.append(2 * mixed.square().mean()
+        terms.append(2 * mixed.square().sum(-1).mean()
                      / (spacing_mm[axis_a] * spacing_mm[axis_b]) ** 2)
     return sum(terms)
 
@@ -131,10 +152,10 @@ def _descent(parameter: Tensor, objective, iterations: int, step: float,
         gradient = parameter.grad
         if gradient is None or not torch.isfinite(gradient).all():
             raise RuntimeError("NMI gradient is nonfinite")
-        root_mean_square = gradient.square().mean().sqrt()
-        if root_mean_square.item() < 1e-10:
+        norm = gradient.norm()
+        if norm.item() < 1e-10:
             break
-        direction = -gradient / root_mean_square
+        direction = -gradient / norm
         original = parameter.detach().clone()
         baseline = float(current.detach())
         accepted = False
@@ -180,7 +201,7 @@ def register(
         raise ValueError("full-resolution output exceeds max_output_voxels")
     spacing = np.asarray(voxel_spacing, dtype=float)
     final_gap = np.broadcast_to(np.asarray(final_spacing_mm, dtype=float), (3,))
-    if (not np.isfinite(spacing).all() or not np.isfinite(final_gap).all()
+    if (spacing.shape != (3,) or not np.isfinite(spacing).all() or not np.isfinite(final_gap).all()
             or np.any(spacing <= 0) or np.any(final_gap <= 0)
             or levels < 1 or affine_iterations < 0 or ffd_iterations < 0
             or bins < 8 or max_dim < 3 or not np.isfinite(bending_weight)
@@ -233,27 +254,25 @@ def register(
         _descent(affine, affine_objective, affine_iterations,
                  affine_step, tolerance, history)
 
-    residual_mm = None
-    finest_spacing = None
+    control_np = None
     for level in range(levels):
         shape, local_spacing, grid, fixed_level, moving_level, region_level = level_data(level)
         bins_fixed = _fixed_bins(fixed_level, region_level, bins)
-        if residual_mm is None:
-            baseline_np = np.zeros((*shape, 3), np.float32)
-        else:
-            baseline_np = np.stack([resize_volume(residual_mm[..., axis], shape)
-                                    for axis in range(3)], axis=-1)
-        baseline = torch.as_tensor(baseline_np, device=torch_device)
         gap_mm = final_gap * 2 ** (levels - level - 1)
-        bases = tuple(torch.as_tensor(bspline_basis(n, max(2.0, float(gap / voxel))),
+        # Compute lattice extents in float64 to avoid an extra knot from
+        # float32 rounding when the physical field of view is exactly divisible.
+        voxel_mm = spacing * (np.asarray(fixed.shape) - 1) / (np.asarray(shape) - 1)
+        bases = tuple(torch.as_tensor(bspline_basis(n, float(gap / voxel)),
                                       dtype=torch.float32, device=torch_device)
-                      for n, gap, voxel in zip(shape, gap_mm, local_spacing.cpu().numpy()))
-        control = torch.zeros((*[basis.shape[1] for basis in bases], 3),
-                              dtype=torch.float32, device=torch_device, requires_grad=True)
+                      for n, gap, voxel in zip(shape, gap_mm, voxel_mm))
+        grid_shape = tuple(basis.shape[1] for basis in bases)
+        control_np = (np.zeros((*grid_shape, 3), np.float32) if control_np is None
+                      else subdivide_lattice(control_np, grid_shape))
+        control = torch.tensor(control_np, device=torch_device, requires_grad=True)
         affine_field = _affine_field(affine.detach(), grid, local_spacing)
 
         def ffd_objective():
-            local_mm = baseline + _expand(control, bases)
+            local_mm = _expand(control, bases)
             warped = _warp(moving_level, grid, affine_field + local_mm / local_spacing)
             return (-_nmi(warped, region_level, bins_fixed, bins)
                     + bending_weight * _bending(local_mm, local_spacing))
@@ -261,8 +280,7 @@ def register(
         history.append(float(ffd_objective().detach()))
         _descent(control, ffd_objective, ffd_iterations,
                  ffd_step_mm, tolerance, history)
-        residual_mm = (baseline + _expand(control.detach(), bases)).cpu().numpy()
-        finest_spacing = local_spacing.cpu().numpy()
+        control_np = control.detach().cpu().numpy()
 
     theta = affine.detach().cpu().numpy()
     linear = np.eye(3, dtype=np.float32) + theta[:9].reshape(3, 3) * 0.05
@@ -271,8 +289,16 @@ def register(
     affine_matrix = np.eye(4, dtype=np.float32)
     affine_matrix[:3, :3] = linear
     affine_matrix[:3, 3] = translation_mm + center_mm - linear @ center_mm
-    residual_work_vox = residual_mm / finest_spacing
-    field = resize_field(residual_work_vox.astype(np.float32), fixed.shape)
+    field = np.zeros((*fixed.shape, 3), np.float32)
+    control, gap_mm = control_np, final_gap
+    bases_np = [bspline_basis(n, float(gap / voxel)).astype(np.float32)
+                for n, gap, voxel in zip(fixed.shape, gap_mm, spacing)]
+    bz, by, bx = bases_np
+    for start in range(0, fixed.shape[0], 8):
+        stop = min(fixed.shape[0], start + 8)
+        local_mm = np.einsum("za,abcd,yb,xc->zyxd", bz[start:stop], control, by, bx,
+                             optimize=True)
+        field[start:stop] += local_mm / spacing
     for start in range(0, fixed.shape[0], 8):
         stop = min(fixed.shape[0], start + 8)
         zz, yy, xx = np.meshgrid(np.arange(start, stop),

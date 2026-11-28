@@ -8,7 +8,7 @@ from torch.nn import functional as F
 from data.geometry import bspline_basis
 
 
-def warp_torch3d(image: Tensor, field: Tensor) -> Tensor:
+def warp_torch3d(image: Tensor, field: Tensor, *, padding_mode: str = "zeros") -> Tensor:
     """Pull [B,C,D,H,W] moving data with (dz,dy,dx) voxel displacements."""
     if image.ndim != 5 or field.shape != (image.shape[0], *image.shape[-3:], 3):
         raise ValueError("expected image [B,C,D,H,W] and field [B,D,H,W,3]")
@@ -21,7 +21,7 @@ def warp_torch3d(image: Tensor, field: Tensor) -> Tensor:
     grid = torch.stack((2 * (x + field[..., 2]) / (width - 1) - 1,
                         2 * (y + field[..., 1]) / (height - 1) - 1,
                         2 * (z + field[..., 0]) / (depth - 1) - 1), dim=-1)
-    return F.grid_sample(image, grid, mode="bilinear", padding_mode="zeros", align_corners=True)
+    return F.grid_sample(image, grid, mode="bilinear", padding_mode=padding_mode, align_corners=True)
 
 
 def bending_energy3d(field: Tensor) -> Tensor:
@@ -49,7 +49,8 @@ def ncc_loss3d(fixed: Tensor, warped: Tensor, mask: Tensor | None = None) -> Ten
     a = (fixed - ((fixed * weight).sum(dim=axes) / count)[:, None, None, None, None]) * weight
     b = (warped - ((warped * weight).sum(dim=axes) / count)[:, None, None, None, None]) * weight
     numerator = (a * b).sum(dim=axes)
-    denominator = torch.sqrt(a.square().sum(dim=axes) * b.square().sum(dim=axes))
+    # Clamp before sqrt: where() alone does not prevent NaN gradients at zero variance.
+    denominator = torch.sqrt((a.square().sum(dim=axes) * b.square().sum(dim=axes)).clamp_min(1e-24))
     correlation = torch.where(denominator > 1e-12, numerator / denominator.clamp_min(1e-12), 0)
     return (1 - correlation).mean()
 

@@ -34,7 +34,7 @@ def _save(path: Path, model, optimizer, step: int, best_loss: float,
     temporary.replace(path)
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=DATASET_FOLDERS, default="oasis_2d")
     parser.add_argument("--root", type=Path, help="Override this dataset's directory")
@@ -52,7 +52,7 @@ def main() -> None:
     parser.add_argument("--max-dim", type=int, default=96)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if (args.steps < 1 or args.val_every < 1 or args.val_pairs < 1 or args.spacing < 2
             or args.max_dim < 3 or (args.batch_size is not None and args.batch_size < 1)
             or not np.isfinite(args.learning_rate) or args.learning_rate <= 0

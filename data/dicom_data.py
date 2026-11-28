@@ -56,15 +56,22 @@ def _sunnybrook_cases(root: Path, split: str):
     part_for_split = {"train": 3, "val": 2, "test": 1}
     if split not in (*part_for_split, "all"):
         raise ValueError("split must be train, val, test, or all")
-    for dicom_dir in sorted(root.glob("dicom/*/*/SC-*/DICOM")):
+    # Accept the archive layout as well as an optional dicom/contours wrapper.
+    contour_index = {}
+    for path in root.rglob("IRCCI-expert"):
+        if "__MACOSX" not in path.parts:
+            contour_index.setdefault(path.parent.parent.name, []).append(path)
+    for dicom_dir in sorted(root.rglob("DICOM")):
+        if "__MACOSX" in dicom_dir.parts or not dicom_dir.parent.name.startswith("SC-"):
+            continue
         part_match = re.search(r"Part(\d+)$", dicom_dir.parents[2].name)
         if not part_match:
             continue
         part = int(part_match.group(1))
         if split != "all" and part != part_for_split[split]:
             continue
-        contour_dirs = list(root.glob(
-            f"contours/*Part{part}/*/{dicom_dir.parent.name}/contours-manual/IRCCI-expert"))
+        contour_dirs = [path for path in contour_index.get(dicom_dir.parent.name, [])
+                        if any(name.endswith(f"ContoursPart{part}") for name in path.parts)]
         if len(contour_dirs) != 1:
             raise FileNotFoundError(f"Expected contours for {dicom_dir.parent.name}")
         yield dicom_dir, contour_dirs[0]
@@ -227,7 +234,7 @@ def _contour_volume(contour_dir: Path, phase: int, shape: tuple[int, int, int],
     return labels, covered
 
 
-def _sunnybrook_volume(spec: PairSpec) -> Pair:
+def _sunnybrook_volume(spec: PairSpec, *, paper_normalization: bool = False) -> Pair:
     fixed_match = re.search(r":(?:ED|ES|p)(\d+)$", spec.fixed_id)
     moving_match = re.search(r":(?:ED|ES|p)(\d+)$", spec.moving_id)
     if not fixed_match or not moving_match:
@@ -251,7 +258,14 @@ def _sunnybrook_volume(spec: PairSpec) -> Pair:
         if not common_slices.any():
             raise ValueError("Sunnybrook phases have no jointly annotated slices")
         evaluation_mask = np.broadcast_to(common_slices[:, None, None], fixed.shape).copy()
-    fixed, moving = _normalise(fixed, moving)
+    if paper_normalization:
+        # Section 6.1: minimum and 99th percentile, independently per volume.
+        def normalize(image):
+            low, high = float(image.min()), float(np.percentile(image, 99))
+            return np.clip((image - low) / max(high - low, 1e-6), 0, 1).astype(np.float32)
+        fixed, moving = normalize(fixed), normalize(moving)
+    else:
+        fixed, moving = _normalise(fixed, moving)
     return Pair(fixed, moving, fixed_seg, moving_seg, spacing,
                 spec.fixed_id, spec.moving_id, spec.dataset,
                 evaluation_mask=evaluation_mask)

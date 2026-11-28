@@ -175,7 +175,7 @@ def _mask_for(path: Path, fixed: nib.spatialimages.SpatialImage) -> np.ndarray |
     return (_on_grid(nib.load(str(candidate)), fixed, order=0) > 0).transpose(2, 1, 0).copy()
 
 
-def load_pair(spec: PairSpec) -> Pair:
+def load_pair(spec: PairSpec, *, intensity_range: tuple[float, float] | None = None) -> Pair:
     """Load and align moving/labels to the fixed grid; return (z,y,x) arrays."""
     if spec.dataset not in (*_L2R, "acdc", "ixi"):
         raise ValueError(f"Unsupported NIfTI dataset: {spec.dataset}")
@@ -183,8 +183,16 @@ def load_pair(spec: PairSpec) -> Pair:
     moving_nii = nib.load(str(spec.moving_path))
     if fixed_nii.ndim != 3 or moving_nii.ndim != 3:
         raise ValueError("Expected 3D NIfTI images")
-    fixed = _normalize(_on_grid(fixed_nii, fixed_nii, 1).transpose(2, 1, 0).copy(), spec.dataset)
-    moving = _normalize(_on_grid(moving_nii, fixed_nii, 1).transpose(2, 1, 0).copy(), spec.dataset)
+    def normalize(image):
+        if intensity_range is None:
+            return _normalize(image, spec.dataset)
+        low, high = intensity_range
+        if not np.isfinite([low, high]).all() or high <= low:
+            raise ValueError("intensity_range must be finite and increasing")
+        return np.clip((image - low) / (high - low), 0, 1).astype(np.float32)
+
+    fixed = normalize(_on_grid(fixed_nii, fixed_nii, 1).transpose(2, 1, 0).copy())
+    moving = normalize(_on_grid(moving_nii, fixed_nii, 1).transpose(2, 1, 0).copy())
 
     def label(path: Path | None) -> np.ndarray | None:
         if path is None:
